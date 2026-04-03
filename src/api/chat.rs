@@ -13,9 +13,8 @@ use crate::db;
 use crate::db::schema::{RoutingHistoryRow, TrainingSampleRow, UsageLogRow};
 use crate::error::AppError;
 use crate::feedback;
-use crate::router::hybrid_router::{self, RoutingDecision};
+use crate::router;
 use crate::router::smart_router;
-use crate::router::static_router::resolve_provider;
 use crate::types::chat::ChatCompletionRequest;
 use crate::AppState;
 
@@ -48,7 +47,6 @@ pub async fn chat_completions(
     let task_type = classification.category.to_string();
 
     // Implicit feedback: detect if this is a retry of a recent request.
-    // If so, mark the previous training sample as failed.
     let content_hash = feedback::hash_last_user_message(&req.messages);
     let failed_sample = state
         .feedback
@@ -67,386 +65,97 @@ pub async fn chat_completions(
         });
     }
 
-    // Per-key routing mode
-    match key.routing_mode.as_str() {
-        "hybrid" => {
-            // Check if hybrid config has providers configured
-            if state.config.hybrid.local_provider.is_empty()
-                || state.config.hybrid.cloud_provider.is_empty()
-            {
-                tracing::warn!(
-                    "Key '{}' has routing_mode=hybrid but hybrid config is incomplete, falling back to rules",
-                    key.name
-                );
-                handle_standard_request(state, req, key, request_model, task_type).await
-            } else {
-                // Session-aware hybrid routing
-                let hybrid_decision = {
-                    let cached_target = state.session_router.get_session_target(&req.messages).await;
-                    let base_decision = hybrid_router::hybrid_route(
-                        &state.config.hybrid,
-                        &state.registry,
-                        &state.db,
-                        &req,
-                        Some(&state.dynamic_config),
-                    )
-                    .await;
-
-                    match (&cached_target, base_decision) {
-                        (_, None) => None,
-                        (None, Some(decision)) => {
-                            let target = match &decision {
-                                RoutingDecision::Local { .. } | RoutingDecision::LocalWithFallback { .. } => "local",
-                                RoutingDecision::Cloud { .. } => "cloud",
-                            };
-                            state.session_router.set_session_target(&req.messages, target).await;
-                            tracing::info!("New session: target={}", target);
-                            Some(decision)
-                        }
-                        (Some(target), Some(decision)) => {
-                            Some(override_decision_target(decision, target, &state.config.hybrid))
-                        }
-                    }
-                };
-
-                if let Some(decision) = hybrid_decision {
-                    handle_hybrid_request(state, req, key.id, request_model, task_type, decision).await
-                } else {
-                    handle_standard_request(state, req, key, request_model, task_type).await
-                }
-            }
-        }
-        "smart" => {
-            handle_smart_request(state, req, key, request_model, task_type).await
-        }
-        _ => {
-            // "rules" or any unrecognized value → standard routing
-            handle_standard_request(state, req, key, request_model, task_type).await
-        }
-    }
-}
-
-/// Override a routing decision to match the cached session target.
-///
-/// Keeps provider references from the original decision but changes direction:
-/// - target="cloud" → forces Cloud (session was escalated or started on cloud)
-/// - target="local" → forces Local/LocalWithFallback (session started on local)
-fn override_decision_target(
-    decision: RoutingDecision,
-    target: &str,
-    _config: &crate::config::HybridConfig,
-) -> RoutingDecision {
-    match (target, &decision) {
-        // Already matches target → pass through
-        ("cloud", RoutingDecision::Cloud { .. }) => decision,
-        ("local", RoutingDecision::Local { .. }) => decision,
-        ("local", RoutingDecision::LocalWithFallback { .. }) => decision,
-
-        // Session wants cloud, we have LocalWithFallback → extract cloud provider
-        ("cloud", RoutingDecision::LocalWithFallback { .. }) => {
-            tracing::info!("Session: overriding local → cloud (cached/escalated)");
-            match decision {
-                RoutingDecision::LocalWithFallback { cloud_provider, cloud_model, task_type, .. } => {
-                    RoutingDecision::Cloud {
-                        provider: cloud_provider,
-                        model: cloud_model,
-                        task_type,
-                        reason: "session: staying on cloud".to_string(),
-                    }
-                }
-                _ => unreachable!(),
-            }
-        }
-
-        // Session wants cloud, we only have Local (no cloud ref) → pass through
-        // (rare: only happens if fallback is disabled)
-        ("cloud", RoutingDecision::Local { .. }) => {
-            tracing::info!("Session: want cloud but only have Local decision, passing through");
-            decision
-        }
-
-        // Session wants local, router wants cloud → keep cloud but log it
-        // (don't force local if the router specifically chose cloud — respect the data)
-        ("local", RoutingDecision::Cloud { .. }) => {
-            tracing::info!("Session: want local but router chose cloud, respecting router");
-            decision
-        }
-
-        _ => decision,
-    }
-}
-
-/// Handle a request using smart content-based routing.
-/// Always classifies the request and routes based on [smart_routing] config,
-/// regardless of the model name in the request.
-async fn handle_smart_request(
-    state: Arc<AppState>,
-    req: ChatCompletionRequest,
-    key: crate::db::schema::KeyRow,
-    request_model: String,
-    task_type: String,
-) -> Result<Response, AppError> {
-    if let Some(ref sr_config) = state.config.smart_routing {
-        match smart_router::smart_route(sr_config, &state.registry, &req.messages).await {
-            Some((provider, model)) => {
-                let mut req = req;
-                req.model = model.clone();
-                let key_id = key.id.clone();
-                execute_and_track(state, req, key_id, request_model, model, task_type, provider, "cloud").await
-            }
-            None => Err(AppError::NoRoute(
-                "Smart routing: no matching provider found".into(),
-            )),
-        }
-    } else {
-        Err(AppError::BadRequest(
-            "Smart routing not configured. Add [smart_routing] to louter.toml".into(),
-        ))
-    }
-}
-
-/// Handle a request using standard (non-hybrid) routing.
-async fn handle_standard_request(
-    state: Arc<AppState>,
-    req: ChatCompletionRequest,
-    key: crate::db::schema::KeyRow,
-    request_model: String,
-    task_type: String,
-) -> Result<Response, AppError> {
-    let (provider, model) = if req.model == "auto" {
-        if let Some(ref sr_config) = state.config.smart_routing {
-            match smart_router::smart_route(sr_config, &state.registry, &req.messages).await {
-                Some((p, m)) => (p, m),
-                None => {
-                    return Err(AppError::NoRoute(
-                        "Smart routing: no matching provider found".into(),
-                    ));
-                }
-            }
-        } else {
-            return Err(AppError::BadRequest(
-                "Smart routing not configured. Add [smart_routing] to louter.toml".into(),
-            ));
-        }
-    } else {
-        let p = resolve_provider(
-            &state.registry,
-            &state.db,
-            &key.id,
-            key.default_provider_id.as_deref(),
-            &req.model,
-        )
-        .await?;
-        (p, req.model.clone())
-    };
-
-    let mut req = req;
-    req.model = model.clone();
+    // Resolve routing targets (ordered by priority, for failover)
+    let targets = router::resolve_targets(&state.registry, &state.db, &key, &req).await?;
     let key_id = key.id.clone();
 
-    execute_and_track(state, req, key_id, request_model, model, task_type, provider, "cloud").await
-}
-
-/// Handle a request using hybrid routing (local/cloud/fallback).
-async fn handle_hybrid_request(
-    state: Arc<AppState>,
-    req: ChatCompletionRequest,
-    key_id: String,
-    request_model: String,
-    _task_type: String,
-    decision: RoutingDecision,
-) -> Result<Response, AppError> {
-    match decision {
-        RoutingDecision::Local {
-            provider,
-            model,
-            task_type,
-        } => {
-            tracing::info!("Hybrid: routing to local model '{}' (task: {})", model, task_type);
-            let mut req = req;
-            req.model = model.clone();
-            execute_and_track(state, req, key_id, request_model, model, task_type, provider, "local").await
-        }
-
-        RoutingDecision::Cloud {
-            provider,
-            model,
-            task_type,
-            reason,
-        } => {
-            tracing::info!("Hybrid: routing to cloud '{}' (reason: {})", model, reason);
-            let mut req = req;
-            req.model = model.clone();
-            execute_and_track(state, req, key_id, request_model, model, task_type, provider, "cloud").await
-        }
-
-        RoutingDecision::LocalWithFallback {
-            local_provider,
-            local_model,
-            cloud_provider,
-            cloud_model,
-            task_type,
-        } => {
-            // Non-streaming only: try local, fallback to cloud
-            if req.stream {
-                // For streaming, just route to local (no fallback possible)
-                tracing::info!("Hybrid: streaming → local model '{}'", local_model);
-                let mut req = req;
-                req.model = local_model.clone();
-                return execute_and_track(
-                    state, req, key_id, request_model, local_model, task_type, local_provider, "local",
-                )
-                .await;
-            }
-
-            tracing::info!("Hybrid: trying local '{}' with cloud fallback", local_model);
-            let mut local_req = req.clone();
-            local_req.model = local_model.clone();
+    if req.stream {
+        // Streaming: use the first target (no failover possible mid-stream)
+        let target = targets.into_iter().next().ok_or_else(|| {
+            AppError::NoRoute("No routing target available".into())
+        })?;
+        let mut req = req;
+        req.model = target.model.clone();
+        execute_and_track(
+            state, req, key_id, request_model, target.model, task_type, target.provider, "cloud",
+        )
+        .await
+    } else {
+        // Non-streaming: try each target in order (failover on error)
+        let mut last_err = None;
+        for (i, target) in targets.iter().enumerate() {
+            let mut req = req.clone();
+            req.model = target.model.clone();
 
             let start = Instant::now();
-            let db_pool = state.db.clone();
-
-            match local_provider.complete(&local_req).await {
+            match target.provider.complete(&req).await {
                 Ok(response) => {
                     let latency = start.elapsed().as_millis() as i32;
+                    let usage = response.usage.as_ref();
+                    let pt = usage.map(|u| u.prompt_tokens as i32).unwrap_or(0);
+                    let ct = usage.map(|u| u.completion_tokens as i32).unwrap_or(0);
 
-                    // Check if the response looks valid
-                    let has_tools_in_req = local_req.tools.as_ref().is_some_and(|t| !t.is_empty());
-                    let is_valid = validate_response(&response, has_tools_in_req);
+                    let db = state.db.clone();
+                    let key_id_c = key_id.clone();
+                    let request_model_c = request_model.clone();
+                    let model_c = target.model.clone();
+                    let task_type_c = task_type.clone();
+                    let was_fallback = i > 0;
 
-                    if is_valid {
-                        tracing::info!("Hybrid: local model succeeded");
+                    // Collect training sample
+                    let collect_data = state.config.distillation.collect_training_data;
+                    let sample_id = if collect_data {
+                        collect_sample(
+                            &state.db, &req, &response, &request_model, &target.model,
+                            &target.provider.provider_type().to_string(),
+                            &task_type, "cloud", latency,
+                        )
+                        .await
+                    } else {
+                        None
+                    };
+
+                    // Update feedback tracker
+                    let content_hash = feedback::hash_last_user_message(&req.messages);
+                    state
+                        .feedback
+                        .record_and_check_retry(content_hash, &task_type, sample_id, "cloud")
+                        .await;
+
+                    tokio::spawn(async move {
                         log_usage(
-                            &db_pool, &key_id, &request_model, &local_model,
-                            response.usage.as_ref().map(|u| u.prompt_tokens as i32).unwrap_or(0),
-                            response.usage.as_ref().map(|u| u.completion_tokens as i32).unwrap_or(0),
-                            latency,
+                            &db, &key_id_c, &request_model_c, &model_c, pt, ct, latency,
                         ).await;
-                        log_routing(&db_pool, &task_type, "local", true, false, latency).await;
+                        log_routing(&db, &task_type_c, "cloud", true, was_fallback, latency).await;
+                    });
 
-                        // Collect training sample from local success too
-                        if state.config.distillation.collect_training_data {
-                            collect_sample(
-                                &db_pool, &local_req, &response, &request_model, &local_model,
-                                "ollama", &task_type, "local", latency,
-                            ).await;
-                        }
-
-                        return Ok(Json(response).into_response());
-                    }
-
-                    // Local response was bad → fallback to cloud + escalate session
-                    tracing::info!("Hybrid: local response invalid, falling back to cloud");
-                    log_routing(&db_pool, &task_type, "local", false, false, latency).await;
-                    state.session_router.escalate_to_cloud(&local_req.messages).await;
+                    return Ok(Json(response).into_response());
                 }
                 Err(e) => {
                     let latency = start.elapsed().as_millis() as i32;
-                    tracing::warn!("Hybrid: local model error: {e}, falling back to cloud");
-                    log_routing(&db_pool, &task_type, "local", false, false, latency).await;
-                    state.session_router.escalate_to_cloud(&local_req.messages).await;
+                    tracing::warn!(
+                        "Provider '{}' failed (target {}/{}): {e}",
+                        target.provider.name(),
+                        i + 1,
+                        targets.len()
+                    );
+                    let db = state.db.clone();
+                    let task_type_c = task_type.clone();
+                    tokio::spawn(async move {
+                        log_routing(&db, &task_type_c, "cloud", false, i > 0, latency).await;
+                    });
+                    last_err = Some(e);
                 }
             }
-
-            // Fallback to cloud
-            let mut cloud_req = req;
-            cloud_req.model = cloud_model.clone();
-            let start = Instant::now();
-
-            let response = cloud_provider.complete(&cloud_req).await?;
-            let latency = start.elapsed().as_millis() as i32;
-
-            let usage = response.usage.as_ref();
-            log_usage(
-                &db_pool, &key_id, &request_model, &cloud_model,
-                usage.map(|u| u.prompt_tokens as i32).unwrap_or(0),
-                usage.map(|u| u.completion_tokens as i32).unwrap_or(0),
-                latency,
-            ).await;
-            log_routing(&db_pool, &task_type, "cloud", true, true, latency).await;
-
-            // Collect training sample from cloud fallback
-            if state.config.distillation.collect_training_data {
-                collect_sample(
-                    &db_pool, &cloud_req, &response, &request_model, &cloud_model,
-                    "cloud", &task_type, "cloud", latency,
-                ).await;
-            }
-
-            Ok(Json(response).into_response())
         }
+
+        Err(last_err.unwrap_or_else(|| {
+            AppError::NoRoute("No routing target available".into())
+        }))
     }
 }
 
-/// Validate a non-streaming response looks reasonable.
-///
-/// Beyond just checking for content presence, validates that the response
-/// is substantive enough to be useful.
-fn validate_response(
-    response: &crate::types::chat::ChatCompletionResponse,
-    has_tools_in_request: bool,
-) -> bool {
-    // Must have at least one choice
-    if response.choices.is_empty() {
-        return false;
-    }
-
-    let choice = &response.choices[0];
-
-    // Check finish_reason
-    if let Some(ref reason) = choice.finish_reason {
-        if reason == "error" {
-            return false;
-        }
-    }
-
-    let has_tool_calls = choice
-        .message
-        .tool_calls
-        .as_ref()
-        .is_some_and(|tc| !tc.is_empty());
-
-    // If request had tools but response has no tool_calls, check content quality
-    if has_tools_in_request && !has_tool_calls {
-        let content = choice
-            .message
-            .content
-            .as_ref()
-            .map(|c| c.trim())
-            .unwrap_or("");
-        // Local model should have called a tool but didn't — likely low quality
-        if content.len() < 20 {
-            return false;
-        }
-        // Check for common "I can't do this" patterns from local models
-        let refusal_patterns = [
-            "I cannot", "I can't", "I'm unable", "I don't have",
-            "sorry", "apologize", "as an ai",
-            "无法", "抱歉", "不能",
-        ];
-        let content_lower = content.to_lowercase();
-        for pattern in &refusal_patterns {
-            if content_lower.contains(pattern) {
-                return false;
-            }
-        }
-    }
-
-    // Must have content or tool_calls
-    let has_content = choice
-        .message
-        .content
-        .as_ref()
-        .is_some_and(|c| c.trim().len() >= 5);
-
-    if !has_content && !has_tool_calls {
-        return false;
-    }
-
-    true
-}
-
-/// Execute a request and track usage + training data.
+/// Execute a request and track usage + training data (used for streaming).
 async fn execute_and_track(
     state: Arc<AppState>,
     req: ChatCompletionRequest,
@@ -465,7 +174,7 @@ async fn execute_and_track(
         let chunk_stream = provider.stream(&req).await?;
 
         let db = state.db.clone();
-        let collect_data = state.config.distillation.collect_training_data && source == "cloud";
+        let collect_data = state.config.distillation.collect_training_data;
         let req_for_sample = if collect_data { Some(req.clone()) } else { None };
         let task_type_clone = task_type.clone();
         let request_model_clone = request_model.clone();
@@ -524,11 +233,10 @@ async fn execute_and_track(
             let _ = tx.send(Ok(Event::default().data("[DONE]"))).await;
 
             let latency = start.elapsed().as_millis() as i32;
-            let total_tokens = prompt_tokens + completion_tokens;
             let (pt, ct, tt) = (
                 prompt_tokens as i32,
                 completion_tokens as i32,
-                total_tokens as i32,
+                (prompt_tokens + completion_tokens) as i32,
             );
 
             log_usage(&db, &key_id, &request_model_clone, &model_clone, pt, ct, latency).await;
@@ -592,26 +300,19 @@ async fn execute_and_track(
         let task_type_clone = task_type.clone();
         let source_clone = source.clone();
 
-        // Collect training sample from cloud responses
-        let collect_data = state.config.distillation.collect_training_data && source == "cloud";
+        // Collect training sample
+        let collect_data = state.config.distillation.collect_training_data;
         let sample_id = if collect_data {
             collect_sample(
-                &db,
-                &req,
-                &response,
-                &request_model,
-                &model,
-                "cloud",
-                &task_type,
-                &source,
-                latency,
+                &db, &req, &response, &request_model, &model,
+                "cloud", &task_type, &source, latency,
             )
             .await
         } else {
             None
         };
 
-        // Update feedback tracker with sample_id for retry detection
+        // Update feedback tracker
         let content_hash = feedback::hash_last_user_message(&req.messages);
         state
             .feedback
@@ -678,7 +379,6 @@ async fn log_routing(
 }
 
 /// Collect a training sample from a completed request/response pair.
-/// Returns the sample ID for feedback tracking.
 async fn collect_sample(
     db: &sqlx::SqlitePool,
     req: &ChatCompletionRequest,

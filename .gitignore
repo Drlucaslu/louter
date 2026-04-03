@@ -10,3 +10,5 @@ distill/merged_model/
 distill/.venv/
 distill/venv/
 *.tgz
+*.db-shm
+*.db-wal

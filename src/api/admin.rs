@@ -168,14 +168,14 @@ pub async fn list_keys(
 }
 
 fn default_routing_mode() -> String {
-    "rules".to_string()
+    "failover".to_string()
 }
 
 fn validate_routing_mode(mode: &str) -> Result<String, AppError> {
     match mode {
-        "rules" | "hybrid" | "smart" => Ok(mode.to_string()),
+        "failover" | "content" => Ok(mode.to_string()),
         _ => Err(AppError::BadRequest(format!(
-            "Invalid routing_mode '{}'. Must be 'rules', 'hybrid', or 'smart'",
+            "Invalid routing_mode '{}'. Must be 'failover' or 'content'",
             mode
         ))),
     }
@@ -185,7 +185,7 @@ fn validate_routing_mode(mode: &str) -> Result<String, AppError> {
 pub struct CreateKeyRequest {
     #[serde(default)]
     pub name: String,
-    pub default_provider_id: Option<String>,
+    pub default_provider_id: String,
     #[serde(default = "default_routing_mode")]
     pub routing_mode: String,
 }
@@ -195,13 +195,29 @@ pub async fn create_key(
     Json(req): Json<CreateKeyRequest>,
 ) -> AppResult<Json<KeyRow>> {
     let routing_mode = validate_routing_mode(&req.routing_mode)?;
+
+    // Validate default_provider_id exists
+    if req.default_provider_id.is_empty() {
+        return Err(AppError::BadRequest(
+            "default_provider_id is required — every key must have at least one provider".to_string(),
+        ));
+    }
+    db::get_provider(&state.db, &req.default_provider_id)
+        .await?
+        .ok_or_else(|| {
+            AppError::BadRequest(format!(
+                "Provider '{}' not found",
+                req.default_provider_id
+            ))
+        })?;
+
     let now = chrono::Utc::now().to_rfc3339();
     let key_value = format!("lot_{}", generate_key());
     let row = KeyRow {
         id: uuid::Uuid::new_v4().to_string(),
         key_value,
         name: req.name,
-        default_provider_id: req.default_provider_id,
+        default_provider_id: Some(req.default_provider_id),
         routing_mode,
         is_enabled: true,
         created_at: now.clone(),
@@ -276,9 +292,6 @@ pub async fn create_routing_rule(
     if req.target_provider_id.is_empty() {
         return Err(AppError::BadRequest("target_provider_id cannot be empty".to_string()));
     }
-
-    // Remove existing rule with same key_id + model_pattern (upsert behavior)
-    db::delete_routing_rule_by_key_and_pattern(&state.db, &req.key_id, &pattern).await?;
 
     let now = chrono::Utc::now().to_rfc3339();
     let row = RoutingRuleRow {

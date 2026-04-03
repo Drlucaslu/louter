@@ -7,7 +7,7 @@ use axum::response::Response;
 
 use crate::db;
 use crate::error::AppError;
-use crate::router::static_router::resolve_provider;
+use crate::router::static_router;
 use crate::types::provider::ProviderType;
 use crate::AppState;
 
@@ -37,16 +37,26 @@ pub async fn proxy_passthrough(
     let body_json: serde_json::Value = serde_json::from_slice(&body).unwrap_or_default();
     let model = body_json["model"].as_str().unwrap_or("");
 
-    // Resolve provider
+    // Resolve provider: routing rules → default provider
     let provider = if !model.is_empty() {
-        resolve_provider(
-            &state.registry,
-            &state.db,
-            &key.id,
-            key.default_provider_id.as_deref(),
-            model,
-        )
-        .await?
+        let rules = db::get_routing_rules_for_key(&state.db, &key.id).await?;
+        let mut found = None;
+        for rule in &rules {
+            if static_router::match_pattern(&rule.model_pattern, model) {
+                if let Some(p) = state.registry.get(&rule.target_provider_id).await {
+                    found = Some(p);
+                    break;
+                }
+            }
+        }
+        if let Some(p) = found {
+            p
+        } else if let Some(dp_id) = &key.default_provider_id {
+            state.registry.get(dp_id).await
+                .ok_or_else(|| AppError::NoRoute("Default provider not found".to_string()))?
+        } else {
+            return Err(AppError::NoRoute(format!("No provider found for model '{model}'")));
+        }
     } else if let Some(dp_id) = &key.default_provider_id {
         state
             .registry

@@ -1,8 +1,3 @@
-use std::collections::HashMap;
-use std::sync::Arc;
-
-use crate::providers::Provider;
-use crate::router::static_router::ProviderRegistry;
 use crate::types::chat::{ChatCompletionRequest, Message};
 
 /// Task classification result with richer metadata for routing decisions.
@@ -108,63 +103,6 @@ fn has_any_word(text: &str, words: &[&str]) -> bool {
 
 fn has_any_char(text: &str, chars: &[char]) -> bool {
     chars.iter().any(|c| text.contains(*c))
-}
-
-/// Route based on smart classification.
-///
-/// Returns `(provider, model_name)` if a matching provider is found.
-pub async fn smart_route(
-    config: &HashMap<String, String>,
-    registry: &ProviderRegistry,
-    messages: &[Message],
-) -> Option<(Arc<dyn Provider>, String)> {
-    let text = messages
-        .iter()
-        .rev()
-        .find(|m| m.role == "user")
-        .and_then(|m| m.content.as_ref())
-        .map(|c| c.as_text())
-        .unwrap_or_default();
-
-    let text_lower = text.to_lowercase();
-
-    let category = if text.contains("```")
-        || has_any_word(
-            &text_lower,
-            &[
-                "function", "import ", "const ", "var ", "fn ", "pub ", "async",
-                "=>", "compile", "runtime", "debug",
-            ],
-        )
-        || has_any_word(&text, &["def ", "class "])
-        || has_any_word(&text_lower, &["error", "bug", "fix"])
-    {
-        "code"
-    } else if has_any_char(&text, &['∑', '∫', '∂', '√'])
-        || has_any_word(&text, &["\\frac", "\\sum", "\\int"])
-        || (text.contains('$') && text.matches('$').count() >= 2)
-        || has_any_word(
-            &text_lower,
-            &["equation", "theorem", "proof", "calculate"],
-        )
-        || has_any_word(&text, &["公式", "方程", "计算"])
-    {
-        "math"
-    } else if has_any_word(&text_lower, &["translate", "translation"]) || text.contains("翻译") {
-        "translation"
-    } else {
-        "general"
-    };
-
-    let value = config.get(category).or_else(|| config.get("general"))?;
-    let (provider_name, model_name) = value.split_once('/')?;
-
-    let all = registry.all().await;
-    let (_, provider) = all
-        .iter()
-        .find(|(_, p)| p.name().eq_ignore_ascii_case(provider_name))?;
-
-    Some((provider.clone(), model_name.to_string()))
 }
 
 #[cfg(test)]

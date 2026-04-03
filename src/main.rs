@@ -3,10 +3,8 @@ mod config;
 #[allow(dead_code)]
 mod db;
 mod error;
-mod dynamic_config;
 mod feedback;
 mod providers;
-mod session;
 mod router;
 mod server;
 mod types;
@@ -23,8 +21,6 @@ pub struct AppState {
     pub registry: ProviderRegistry,
     pub config: AppConfig,
     pub feedback: feedback::FeedbackTracker,
-    pub session_router: session::SessionRouter,
-    pub dynamic_config: dynamic_config::DynamicHybridConfig,
 }
 
 #[tokio::main]
@@ -59,8 +55,6 @@ async fn main() {
         AppConfig {
             server: Default::default(),
             database: Default::default(),
-            smart_routing: None,
-            hybrid: Default::default(),
             distillation: Default::default(),
         }
     };
@@ -118,8 +112,6 @@ async fn main() {
         registry,
         config,
         feedback: feedback::FeedbackTracker::new(),
-        session_router: session::SessionRouter::new(),
-        dynamic_config: dynamic_config::DynamicHybridConfig::new(),
     });
 
     let app = server::build_router(state);

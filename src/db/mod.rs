@@ -29,6 +29,9 @@ pub async fn init_db(database_url: &str) -> Result<SqlitePool, String> {
     let m005 = include_str!("../../migrations/005_rl_episodes.sql");
     let _ = sqlx::raw_sql(m005).execute(&pool).await;
 
+    let m006 = include_str!("../../migrations/006_routing_modes.sql");
+    let _ = sqlx::raw_sql(m006).execute(&pool).await;
+
     Ok(pool)
 }
 

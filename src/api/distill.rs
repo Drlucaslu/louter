@@ -36,7 +36,6 @@ pub async fn routing_stats(
     let stats = db::get_routing_stats(&state.db, days).await?;
     let success_rates = db::get_local_success_rates(&state.db, days).await?;
 
-    // Calculate overall local hit rate
     let total_requests: i64 = stats.iter().map(|s| s.total).sum();
     let local_requests: i64 = stats
         .iter()
@@ -49,8 +48,6 @@ pub async fn routing_stats(
         0.0
     };
 
-    let session_stats = state.session_router.get_stats().await;
-
     Ok(Json(serde_json::json!({
         "days": days,
         "total_requests": total_requests,
@@ -59,7 +56,6 @@ pub async fn routing_stats(
         "local_hit_rate": local_hit_rate,
         "by_destination": stats,
         "local_success_by_type": success_rates,
-        "sessions": session_stats,
     })))
 }
 
@@ -111,18 +107,37 @@ pub async fn export_samples(
 
 #[derive(Debug, serde::Deserialize)]
 pub struct ExportRequest {
-    /// Filter by task type (tool_call, code, general, etc.)
     pub task_type: Option<String>,
-    /// Max number of samples to export
     pub limit: Option<i32>,
-    /// Output format: "openai" (default) or "sharegpt"
     pub format: Option<String>,
-    /// Whether to mark samples as exported after retrieval
     pub mark_exported: Option<bool>,
 }
 
-/// Convert a training sample to OpenAI fine-tuning format.
-/// Format: {"messages": [{"role": "...", "content": "..."}, ...]}
+/// GET /api/admin/distill/config — Get current distillation config
+pub async fn get_distill_config(
+    State(state): State<Arc<AppState>>,
+) -> AppResult<Json<serde_json::Value>> {
+    let distill = &state.config.distillation;
+
+    Ok(Json(serde_json::json!({
+        "distillation": {
+            "collect_training_data": distill.collect_training_data,
+            "max_samples": distill.max_samples,
+            "only_successful": distill.only_successful,
+        },
+    })))
+}
+
+/// PUT /api/admin/distill/config — placeholder (config is static for now)
+pub async fn update_distill_config(
+    State(_state): State<Arc<AppState>>,
+    Json(_req): Json<serde_json::Value>,
+) -> AppResult<Json<serde_json::Value>> {
+    Ok(Json(serde_json::json!({
+        "message": "Distillation config is currently static. Edit louter.toml and restart.",
+    })))
+}
+
 fn convert_to_openai_format(
     sample: &db::schema::TrainingSampleRow,
 ) -> Option<serde_json::Value> {
@@ -133,7 +148,6 @@ fn convert_to_openai_format(
     let mut conversation = messages;
     conversation.push(response);
 
-    // Add tools if present
     if let Some(ref tools_json) = sample.request_tools {
         let tools: serde_json::Value = serde_json::from_str(tools_json).ok()?;
         return Some(serde_json::json!({
@@ -147,8 +161,6 @@ fn convert_to_openai_format(
     }))
 }
 
-/// Convert a training sample to ShareGPT format.
-/// Format: {"conversations": [{"from": "human", "value": "..."}, {"from": "gpt", "value": "..."}]}
 fn convert_to_sharegpt_format(
     sample: &db::schema::TrainingSampleRow,
 ) -> Option<serde_json::Value> {
@@ -179,7 +191,6 @@ fn convert_to_sharegpt_format(
         }));
     }
 
-    // Add assistant response
     let response_content = response
         .get("content")
         .and_then(|c| c.as_str())
@@ -192,54 +203,4 @@ fn convert_to_sharegpt_format(
     Some(serde_json::json!({
         "conversations": conversations,
     }))
-}
-
-/// GET /api/admin/distill/config — Get current hybrid/distillation config
-pub async fn get_distill_config(
-    State(state): State<Arc<AppState>>,
-) -> AppResult<Json<serde_json::Value>> {
-    let hybrid = &state.config.hybrid;
-    let distill = &state.config.distillation;
-    let overrides = state.dynamic_config.get().await;
-
-    Ok(Json(serde_json::json!({
-        "hybrid": {
-            "enabled": hybrid.enabled,
-            "local_provider": hybrid.local_provider,
-            "local_model": hybrid.local_model,
-            "cloud_provider": hybrid.cloud_provider,
-            "cloud_model": hybrid.cloud_model,
-            "min_local_success_rate": hybrid.min_local_success_rate,
-            "min_samples": hybrid.min_samples,
-            "fallback_enabled": hybrid.fallback_enabled,
-            "local_task_types": hybrid.local_task_types,
-            "max_local_context_tokens": hybrid.max_local_context_tokens,
-            "max_local_latency_ms": hybrid.max_local_latency_ms,
-        },
-        "distillation": {
-            "collect_training_data": distill.collect_training_data,
-            "max_samples": distill.max_samples,
-            "only_successful": distill.only_successful,
-        },
-        "dynamic_overrides": overrides,
-    })))
-}
-
-/// PUT /api/admin/distill/config — Update dynamic routing parameters at runtime
-///
-/// These overrides take effect immediately without restarting.
-/// As the distilled model improves, relax these thresholds to route more to local.
-pub async fn update_distill_config(
-    State(state): State<Arc<AppState>>,
-    Json(req): Json<crate::dynamic_config::Overrides>,
-) -> AppResult<Json<serde_json::Value>> {
-    state.dynamic_config.update(req).await;
-    let current = state.dynamic_config.get().await;
-
-    tracing::info!("Dynamic config updated: {:?}", current);
-
-    Ok(Json(serde_json::json!({
-        "message": "Config updated successfully",
-        "dynamic_overrides": current,
-    })))
 }

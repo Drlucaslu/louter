@@ -8,22 +8,25 @@ port = 6188
 [database]
 path = "louter.db"
 
-# Providers and API keys are configured through the Web UI at http://localhost:6188
-
-# Hybrid inference: route simple requests to a local model, complex ones to the cloud.
-# Requires Ollama (or any OpenAI-compatible local provider) running locally.
-# To enable: set the key's routing_mode to "hybrid" in the Web UI (Keys page).
-# [hybrid]
-# local_provider = "ollama"
-# local_model = "qwen2.5:1.5b"            # or "louter-distilled" after fine-tuning
-# cloud_provider = "anthropic"
-# cloud_model = "claude-sonnet-4-20250514"
-# min_local_success_rate = 0.7             # route to cloud if local success < 70%
-# min_samples = 20                         # min data before trusting success rate
-# fallback_enabled = true                  # try local first, fall back to cloud
-# local_task_types = ["general"]           # "general", "tool_call", "code", "math", "translation"
-# max_local_context_tokens = 2000          # large contexts go to cloud
-# max_local_latency_ms = 30000             # slow responses go to cloud
+# Providers, API keys, and routing rules are configured through the Web UI
+# at http://localhost:6188
+#
+# Key routing modes:
+#   - failover: match model name patterns → try providers by priority (failover on error)
+#   - content:  classify request content (code/math/translation/general) → route by type
+#
+# Examples:
+#   failover mode rules:
+#     claude-* → anthropic (priority 100)
+#     claude-* → openai    (priority 50)   ← fallback if anthropic fails
+#     gpt-*   → openai     (priority 100)
+#     *       → ollama     (priority 10)   ← catch-all
+#
+#   content mode rules:
+#     @code        → anthropic (priority 100)
+#     @math        → openai    (priority 100)
+#     @translation → ollama    (priority 100)
+#     @general     → ollama    (priority 100)
 
 # Distillation: automatically collect cloud responses as training data.
 # Use distill/run_distill.sh to export, compress, fine-tune, and deploy.
@@ -31,12 +34,3 @@ path = "louter.db"
 # collect_training_data = true             # default: true
 # max_samples = 100000                     # prune oldest when exceeded
 # only_successful = true                   # only collect status-200 responses
-
-# Smart routing: when model="auto", classify messages and route to different providers.
-# Format: category = "provider_name/model_name"
-# Categories: code, math, translation, general (fallback)
-# [smart_routing]
-# code = "anthropic/claude-sonnet-4-20250514"
-# math = "deepseek/deepseek-chat"
-# translation = "qwen/qwen-plus"
-# general = "qwen/qwen-plus"

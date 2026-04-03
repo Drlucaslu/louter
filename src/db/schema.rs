@@ -28,7 +28,7 @@ pub struct KeyRow {
     pub key_value: String,
     pub name: String,
     pub default_provider_id: Option<String>,
-    pub routing_mode: String, // "rules", "hybrid", or "smart"
+    pub routing_mode: String, // "failover" or "content"
     pub is_enabled: bool,
     pub created_at: String,
     pub updated_at: String,

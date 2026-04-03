@@ -5,7 +5,7 @@ interface Key {
   key_value: string
   name: string
   default_provider_id: string | null
-  routing_mode: string // "rules" | "hybrid" | "smart"
+  routing_mode: string // "failover" | "content"
   is_enabled: boolean
   created_at: string
 }
@@ -29,19 +29,20 @@ const MODEL_PATTERN_PRESETS: Record<string, string[]> = {
   anthropic: ['claude-*', 'claude-sonnet-*', 'claude-opus-*', 'claude-haiku-*', '*'],
   deepseek: ['deepseek-*', 'deepseek-chat', 'deepseek-reasoner', '*'],
   azure: ['gpt-*', 'gpt-4o*', 'gpt-4*', '*'],
-  ollama: ['*', 'llama*', 'mistral*'],
+  ollama: ['*', 'llama*', 'mistral*', 'qwen*'],
   qwen: ['qwen-*', 'qwen-plus*', 'qwen-turbo*', '*'],
   groq: ['*', 'llama*', 'mixtral*'],
   together: ['*'],
   fireworks: ['*'],
 }
 
-function getPatternOptions(provider: Provider | undefined): string[] {
+const CONTENT_TYPES = ['@code', '@math', '@translation', '@tool_call', '@general']
+
+function getPatternOptions(provider: Provider | undefined, mode: string): string[] {
+  if (mode === 'content') return CONTENT_TYPES
   if (!provider) return ['*']
-  // Try provider_type first
   const byType = MODEL_PATTERN_PRESETS[provider.provider_type]
   if (byType) return byType
-  // Fallback: infer from provider name
   const name = provider.name.toLowerCase()
   for (const [key, patterns] of Object.entries(MODEL_PATTERN_PRESETS)) {
     if (name.includes(key)) return patterns
@@ -54,7 +55,7 @@ export default function Keys() {
   const [rules, setRules] = useState<RoutingRule[]>([])
   const [providers, setProviders] = useState<Provider[]>([])
   const [showKeyForm, setShowKeyForm] = useState(false)
-  const [keyForm, setKeyForm] = useState({ name: '', default_provider_id: '', routing_mode: 'rules' })
+  const [keyForm, setKeyForm] = useState(() => ({ name: '', default_provider_id: '', routing_mode: 'failover' }))
   const [showRuleForm, setShowRuleForm] = useState<string | null>(null)
   const [ruleForm, setRuleForm] = useState({ model_pattern: '', target_provider_id: '', priority: 0 })
   const [copied, setCopied] = useState<string | null>(null)
@@ -74,17 +75,21 @@ export default function Keys() {
   useEffect(() => { load() }, [])
 
   const createKey = async () => {
+    if (!keyForm.default_provider_id) {
+      alert('Please select a default provider — every key must have at least one provider.')
+      return
+    }
     await fetch('/api/admin/keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
         name: keyForm.name,
-        default_provider_id: keyForm.default_provider_id || null,
+        default_provider_id: keyForm.default_provider_id,
         routing_mode: keyForm.routing_mode,
       }),
     })
     setShowKeyForm(false)
-    setKeyForm({ name: '', default_provider_id: '', routing_mode: 'rules' })
+    setKeyForm({ name: '', default_provider_id: '', routing_mode: 'failover' })
     load()
   }
 
@@ -137,19 +142,22 @@ export default function Keys() {
 
   const providerName = (id: string) => providers.find(p => p.id === id)?.name || id
 
+  // Get the routing mode for the key that the rule form is currently open for
+  const currentKeyMode = showRuleForm ? keys.find(k => k.id === showRuleForm)?.routing_mode || 'failover' : 'failover'
+
   // Auto-fill model pattern when provider changes
   const [prevProviderId, setPrevProviderId] = useState('')
   useEffect(() => {
     if (ruleForm.target_provider_id && ruleForm.target_provider_id !== prevProviderId) {
       setPrevProviderId(ruleForm.target_provider_id)
       const provider = providers.find(p => p.id === ruleForm.target_provider_id)
-      const options = getPatternOptions(provider)
+      const options = getPatternOptions(provider, currentKeyMode)
       setRuleForm(prev => ({ ...prev, model_pattern: options[0] }))
     }
-  }, [ruleForm.target_provider_id, prevProviderId, providers])
+  }, [ruleForm.target_provider_id, prevProviderId, providers, currentKeyMode])
 
   const selectedProvider = providers.find(p => p.id === ruleForm.target_provider_id)
-  const patternOptions = getPatternOptions(selectedProvider)
+  const patternOptions = getPatternOptions(selectedProvider, currentKeyMode)
   const isCustomPattern = !!(ruleForm.target_provider_id && !patternOptions.includes(ruleForm.model_pattern))
 
   return (
@@ -157,7 +165,12 @@ export default function Keys() {
       <div className="flex justify-between items-center mb-6">
         <h1 className="text-2xl font-bold">API Keys & Routing</h1>
         <button
-          onClick={() => setShowKeyForm(!showKeyForm)}
+          onClick={() => {
+            if (!showKeyForm) {
+              setKeyForm({ name: '', default_provider_id: providers[0]?.id || '', routing_mode: 'failover' })
+            }
+            setShowKeyForm(!showKeyForm)
+          }}
           className="px-4 py-2 bg-blue-600 text-white rounded hover:bg-blue-700 text-sm"
         >
           Create Key
@@ -178,23 +191,28 @@ export default function Keys() {
               onChange={e => setKeyForm({ ...keyForm, routing_mode: e.target.value })}
               className="bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm"
             >
-              <option value="rules">Rules (standard routing)</option>
-              <option value="hybrid">Hybrid (local + cloud)</option>
-              <option value="smart">Smart (content-based)</option>
+              <option value="failover">Failover (priority-based)</option>
+              <option value="content">Content (type-based routing)</option>
             </select>
             <select
               value={keyForm.default_provider_id}
               onChange={e => setKeyForm({ ...keyForm, default_provider_id: e.target.value })}
               className="bg-gray-950 border border-gray-700 rounded px-3 py-2 text-sm"
             >
-              <option value="">No default provider</option>
+              {providers.length === 0 && (
+                <option value="">No providers available</option>
+              )}
               {providers.map(p => (
                 <option key={p.id} value={p.id}>{p.name}</option>
               ))}
             </select>
           </div>
           <div className="mt-4 flex gap-2">
-            <button onClick={createKey} className="px-4 py-2 bg-green-600 text-white rounded text-sm hover:bg-green-700">Create</button>
+            <button
+              onClick={createKey}
+              disabled={providers.length === 0}
+              className={`px-4 py-2 rounded text-sm text-white ${providers.length === 0 ? 'bg-gray-600 cursor-not-allowed' : 'bg-green-600 hover:bg-green-700'}`}
+            >Create</button>
             <button onClick={() => setShowKeyForm(false)} className="px-4 py-2 bg-gray-700 text-white rounded text-sm hover:bg-gray-600">Cancel</button>
           </div>
         </div>
@@ -207,7 +225,7 @@ export default function Keys() {
               <div className="flex items-center gap-2 flex-wrap">
                 <span className="font-medium">{k.name || 'Unnamed Key'}</span>
                 <select
-                  value={k.routing_mode || 'rules'}
+                  value={k.routing_mode || 'failover'}
                   onChange={async (e) => {
                     await fetch(`/api/admin/keys/${k.id}`, {
                       method: 'PUT',
@@ -217,14 +235,12 @@ export default function Keys() {
                     load()
                   }}
                   className={`text-xs px-2 py-0.5 rounded border-0 cursor-pointer ${
-                    k.routing_mode === 'hybrid' ? 'bg-purple-900 text-purple-300' :
-                    k.routing_mode === 'smart' ? 'bg-blue-900 text-blue-300' :
+                    k.routing_mode === 'content' ? 'bg-blue-900 text-blue-300' :
                     'bg-gray-800 text-gray-400'
                   }`}
                 >
-                  <option value="rules">rules</option>
-                  <option value="hybrid">hybrid</option>
-                  <option value="smart">smart</option>
+                  <option value="failover">failover</option>
+                  <option value="content">content</option>
                 </select>
                 <code className="text-xs bg-gray-950 px-2 py-1 rounded text-yellow-400">{k.key_value}</code>
                 <button
@@ -244,6 +260,7 @@ export default function Keys() {
                       setShowRuleForm(null)
                     } else {
                       setRuleForm({ model_pattern: '', target_provider_id: '', priority: 0 })
+                      setPrevProviderId('')
                       setShowRuleForm(k.id)
                     }
                   }}
@@ -276,7 +293,9 @@ export default function Keys() {
                   </select>
                 </div>
                 <div>
-                  <label className="block text-xs text-gray-500 mb-1">Model pattern</label>
+                  <label className="block text-xs text-gray-500 mb-1">
+                    {k.routing_mode === 'content' ? 'Content type' : 'Model pattern'}
+                  </label>
                   {ruleForm.target_provider_id ? (
                     <>
                       <select
@@ -294,9 +313,11 @@ export default function Keys() {
                         {patternOptions.map(p => (
                           <option key={p} value={p}>{p}</option>
                         ))}
-                        <option value="__custom__">Custom...</option>
+                        {k.routing_mode !== 'content' && (
+                          <option value="__custom__">Custom...</option>
+                        )}
                       </select>
-                      {isCustomPattern && (
+                      {isCustomPattern && k.routing_mode !== 'content' && (
                         <input
                           placeholder="e.g. gpt-4o* or my-model"
                           value={ruleForm.model_pattern}
@@ -337,7 +358,9 @@ export default function Keys() {
                 <div className="text-xs text-gray-500 mb-1">Routing Rules:</div>
                 {rules.filter(r => r.key_id === k.id).map(r => (
                   <div key={r.id} className="flex items-center gap-2 text-sm bg-gray-950 rounded px-3 py-1">
-                    <code className="text-blue-400">{r.model_pattern}</code>
+                    <code className={r.model_pattern.startsWith('@') ? 'text-purple-400' : 'text-blue-400'}>
+                      {r.model_pattern}
+                    </code>
                     <span className="text-gray-600">&rarr;</span>
                     <span className="text-green-400">{providerName(r.target_provider_id)}</span>
                     <span className="text-gray-600 text-xs">priority: {r.priority}</span>
