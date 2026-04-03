@@ -39,18 +39,7 @@ interface RoutingStats {
   local_success_by_type: LocalSuccessRate[]
 }
 
-interface HybridConfig {
-  hybrid: {
-    enabled: boolean
-    local_provider: string
-    local_model: string
-    cloud_provider: string
-    cloud_model: string
-    min_local_success_rate: number
-    min_samples: number
-    fallback_enabled: boolean
-    local_task_types: string[]
-  }
+interface DistillConfig {
   distillation: {
     collect_training_data: boolean
     max_samples: number
@@ -61,7 +50,7 @@ interface HybridConfig {
 export default function Distill() {
   const [stats, setStats] = useState<DistillStats | null>(null)
   const [routing, setRouting] = useState<RoutingStats | null>(null)
-  const [config, setConfig] = useState<HybridConfig | null>(null)
+  const [config, setConfig] = useState<DistillConfig | null>(null)
   const [loading, setLoading] = useState(true)
 
   useEffect(() => {
@@ -83,78 +72,35 @@ export default function Distill() {
 
   return (
     <div className="space-y-6">
-      <h1 className="text-2xl font-bold">Distillation & Hybrid Inference</h1>
+      <h1 className="text-2xl font-bold">Distillation</h1>
 
-      {/* Config Status */}
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-          <h2 className="text-sm font-medium text-gray-400 mb-3">Hybrid Routing</h2>
-          {config ? (
-            <div className="space-y-2 text-sm">
-              <div className="flex justify-between">
-                <span className="text-gray-400">Status</span>
-                <span className={config.hybrid.local_provider ? 'text-green-400' : 'text-gray-500'}>
-                  {config.hybrid.local_provider ? 'Configured' : 'Not configured'}
-                </span>
-              </div>
-              {config.hybrid.local_provider && (
-                <>
-                  <div className="flex justify-between">
-                    <span className="text-gray-400">Local</span>
-                    <span className="text-blue-400">{config.hybrid.local_provider}/{config.hybrid.local_model}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-400">Cloud</span>
-                    <span className="text-purple-400">{config.hybrid.cloud_provider}/{config.hybrid.cloud_model}</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-400">Min Success Rate</span>
-                    <span>{(config.hybrid.min_local_success_rate * 100).toFixed(0)}%</span>
-                  </div>
-                  <div className="flex justify-between">
-                    <span className="text-gray-400">Fallback</span>
-                    <span className={config.hybrid.fallback_enabled ? 'text-green-400' : 'text-gray-500'}>
-                      {config.hybrid.fallback_enabled ? 'Enabled' : 'Disabled'}
-                    </span>
-                  </div>
-                  <div className="text-xs text-gray-500 mt-1">
-                    Set key routing mode to "hybrid" in Keys page to enable.
-                  </div>
-                </>
-              )}
+      {/* Data Collection Status */}
+      <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
+        <h2 className="text-sm font-medium text-gray-400 mb-3">Data Collection</h2>
+        {config && stats ? (
+          <div className="space-y-2 text-sm">
+            <div className="flex justify-between">
+              <span className="text-gray-400">Collection</span>
+              <span className={config.distillation.collect_training_data ? 'text-green-400' : 'text-gray-500'}>
+                {config.distillation.collect_training_data ? 'Active' : 'Inactive'}
+              </span>
             </div>
-          ) : (
-            <p className="text-gray-500 text-sm">No config loaded</p>
-          )}
-        </div>
-
-        <div className="bg-gray-900 rounded-lg border border-gray-800 p-4">
-          <h2 className="text-sm font-medium text-gray-400 mb-3">Data Collection</h2>
-          {config && stats ? (
-            <div className="space-y-2 text-sm">
-              <div className="flex justify-between">
-                <span className="text-gray-400">Collection</span>
-                <span className={config.distillation.collect_training_data ? 'text-green-400' : 'text-gray-500'}>
-                  {config.distillation.collect_training_data ? 'Active' : 'Inactive'}
-                </span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Total Samples</span>
-                <span className="text-white font-mono">{stats.total_samples.toLocaleString()}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Ready for Export</span>
-                <span className="text-yellow-400 font-mono">{stats.unexported_samples.toLocaleString()}</span>
-              </div>
-              <div className="flex justify-between">
-                <span className="text-gray-400">Already Exported</span>
-                <span className="text-green-400 font-mono">{stats.exported_samples.toLocaleString()}</span>
-              </div>
+            <div className="flex justify-between">
+              <span className="text-gray-400">Total Samples</span>
+              <span className="text-white font-mono">{stats.total_samples.toLocaleString()}</span>
             </div>
-          ) : (
-            <p className="text-gray-500 text-sm">No data</p>
-          )}
-        </div>
+            <div className="flex justify-between">
+              <span className="text-gray-400">Ready for Export</span>
+              <span className="text-yellow-400 font-mono">{stats.unexported_samples.toLocaleString()}</span>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-gray-400">Already Exported</span>
+              <span className="text-green-400 font-mono">{stats.exported_samples.toLocaleString()}</span>
+            </div>
+          </div>
+        ) : (
+          <p className="text-gray-500 text-sm">No data</p>
+        )}
       </div>
 
       {/* Routing Stats */}
@@ -266,21 +212,7 @@ export default function Distill() {
             </pre>
           </div>
           <div>
-            <span className="text-blue-400 font-mono">3.</span> Enable hybrid mode in <code className="text-yellow-400">louter.toml</code>:
-            <pre className="mt-1 bg-gray-800 rounded p-2 text-xs overflow-x-auto">
-{`[hybrid]
-local_provider = "ollama"
-local_model = "louter-distilled"
-cloud_provider = "anthropic"
-cloud_model = "claude-sonnet-4-20250514"
-min_local_success_rate = 0.7
-min_samples = 20
-fallback_enabled = true
-local_task_types = ["tool_call", "code", "general"]`}
-            </pre>
-          </div>
-          <div>
-            <span className="text-blue-400 font-mono">4.</span> Iterate: As you use the system, more data is collected. Re-run distillation periodically to improve the local model.
+            <span className="text-blue-400 font-mono">3.</span> Iterate: As you use the system, more data is collected. Re-run distillation periodically to improve the local model.
           </div>
         </div>
       </div>
