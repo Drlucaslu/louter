@@ -26,6 +26,9 @@ pub async fn init_db(database_url: &str) -> Result<SqlitePool, String> {
     let m004 = include_str!("../../migrations/004_key_routing_mode.sql");
     let _ = sqlx::raw_sql(m004).execute(&pool).await;
 
+    let m005 = include_str!("../../migrations/005_rl_episodes.sql");
+    let _ = sqlx::raw_sql(m005).execute(&pool).await;
+
     Ok(pool)
 }
 
@@ -492,6 +495,90 @@ pub struct RoutingStats {
     pub successful: i64,
     pub fallbacks: i64,
     pub avg_latency_ms: f64,
+}
+
+// ── RL Episodes ──
+
+pub async fn insert_rl_episode(pool: &SqlitePool, row: &RlEpisodeRow) -> AppResult<()> {
+    sqlx::query(
+        "INSERT INTO rl_episodes (id, sample_id, prompt_messages, completion, source, reward, reward_source, reward_details, is_used_for_training, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+    )
+    .bind(&row.id)
+    .bind(&row.sample_id)
+    .bind(&row.prompt_messages)
+    .bind(&row.completion)
+    .bind(&row.source)
+    .bind(row.reward)
+    .bind(&row.reward_source)
+    .bind(&row.reward_details)
+    .bind(row.is_used_for_training)
+    .bind(&row.created_at)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn update_rl_episode_reward(
+    pool: &SqlitePool,
+    id: &str,
+    reward: f64,
+    reward_source: &str,
+    reward_details: Option<&str>,
+) -> AppResult<()> {
+    sqlx::query(
+        "UPDATE rl_episodes SET reward = ?, reward_source = ?, reward_details = ? WHERE id = ?",
+    )
+    .bind(reward)
+    .bind(reward_source)
+    .bind(reward_details)
+    .bind(id)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+pub async fn mark_rl_episodes_used(pool: &SqlitePool, ids: &[String]) -> AppResult<()> {
+    for id in ids {
+        sqlx::query("UPDATE rl_episodes SET is_used_for_training = 1 WHERE id = ?")
+            .bind(id)
+            .execute(pool)
+            .await?;
+    }
+    Ok(())
+}
+
+pub async fn count_rl_episodes_unused(pool: &SqlitePool) -> AppResult<i64> {
+    let row: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*) FROM rl_episodes WHERE is_used_for_training = 0",
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(row.0)
+}
+
+/// RL episode statistics by source and reward status
+#[derive(Debug, Clone, serde::Serialize, sqlx::FromRow)]
+pub struct RlEpisodeStats {
+    pub source: String,
+    pub total: i64,
+    pub scored: i64,
+    pub used_for_training: i64,
+    pub avg_reward: Option<f64>,
+}
+
+pub async fn get_rl_episode_stats(pool: &SqlitePool) -> AppResult<Vec<RlEpisodeStats>> {
+    let rows = sqlx::query_as::<_, RlEpisodeStats>(
+        "SELECT source, \
+         COUNT(*) as total, \
+         SUM(CASE WHEN reward IS NOT NULL THEN 1 ELSE 0 END) as scored, \
+         SUM(CASE WHEN is_used_for_training = 1 THEN 1 ELSE 0 END) as used_for_training, \
+         AVG(reward) as avg_reward \
+         FROM rl_episodes \
+         GROUP BY source"
+    )
+    .fetch_all(pool)
+    .await?;
+    Ok(rows)
 }
 
 pub async fn get_routing_stats(pool: &SqlitePool, days: i32) -> AppResult<Vec<RoutingStats>> {

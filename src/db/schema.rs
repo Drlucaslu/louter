@@ -92,3 +92,19 @@ pub struct RoutingHistoryRow {
     pub latency_ms: i32,
     pub created_at: String,
 }
+
+// ── RL: Episodes ──
+
+#[derive(Debug, Clone, Serialize, Deserialize, sqlx::FromRow)]
+pub struct RlEpisodeRow {
+    pub id: String,
+    pub sample_id: String,
+    pub prompt_messages: String,
+    pub completion: String,
+    pub source: String,
+    pub reward: Option<f64>,
+    pub reward_source: Option<String>,
+    pub reward_details: Option<String>,
+    pub is_used_for_training: bool,
+    pub created_at: String,
+}

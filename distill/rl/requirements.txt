@@ -1,0 +1,24 @@
+# Core (shared with SFT distill pipeline)
+torch>=2.1.0
+transformers>=4.40.0
+peft>=0.10.0
+datasets>=2.18.0
+accelerate>=0.28.0
+bitsandbytes>=0.43.0
+trl>=0.12.0
+
+# Rollout generation (optional — pick one)
+# vllm>=0.6.0              # GPU inference, uncomment if using vLLM
+
+# Reward scoring
+rouge-score>=0.1.2
+anthropic>=0.40.0
+openai>=1.50.0
+
+# Serving (optional)
+fastapi>=0.115.0
+uvicorn>=0.32.0
+
+# General
+numpy>=1.26.0
+requests>=2.31.0
